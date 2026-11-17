@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Normal Distribution Calculator</title>
+<style>
+  :root { --bg:#ffffff; --fg:#1f2328; --muted:#656d76; --border:#d0d7de; --accent:#2563eb; --shade:rgba(37,99,235,.35); --err:#c62828; }
+  :root { color-scheme: light; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { color-scheme: dark; --bg:#14171c; --fg:#e6e8eb; --muted:#9aa4af; --border:#2f353d; --accent:#60a5fa; --shade:rgba(96,165,250,.4); --err:#ef7b7b; }
+  }
+  :root[data-theme="dark"] { color-scheme: dark; --bg:#14171c; --fg:#e6e8eb; --muted:#9aa4af; --border:#2f353d; --accent:#60a5fa; --shade:rgba(96,165,250,.4); --err:#ef7b7b; }
+  .top { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:16px; }
+  .top h1 { margin:0; }
+  #theme { padding:6px 12px; font-size:.85rem; color:var(--fg); background:transparent; border:1px solid var(--border); }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:720px; margin:0 auto; }
+  h1 { font-size:1.4rem; margin:0 0 16px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  label { display:block; font-size:.85rem; color:var(--muted); margin-bottom:4px; }
+  input, select { width:100%; padding:8px 10px; font:inherit; color:var(--fg); background:var(--bg); border:1px solid var(--border); border-radius:6px; }
+  .full { grid-column:1 / -1; }
+  button { padding:10px 18px; font:inherit; color:#fff; background:var(--accent); border:0; border-radius:6px; cursor:pointer; }
+  #error { color:var(--err); min-height:1.5em; margin:10px 0 0; }
+  #results { margin-top:12px; }
+  #results p { margin:2px 0; }
+  canvas { width:100%; height:320px; margin-top:16px; border:1px solid var(--border); border-radius:6px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <div class="top">
+    <h1>Normal Distribution Calculator</h1>
+    <button id="theme" type="button"></button>
+  </div>
+
+  <div class="grid">
+    <div><label for="mean">Mean (μ)</label><input id="mean" type="number" step="any" value="0"></div>
+    <div><label for="sd">Standard deviation (σ)</label><input id="sd" type="number" step="any" value="1"></div>
+
+    <div class="full">
+      <label for="area">Area</label>
+      <select id="area">
+        <option value="1">Above</option>
+        <option value="2">Below</option>
+        <option value="3" selected>Between intervals</option>
+        <option value="4">Outside intervals</option>
+      </select>
+    </div>
+
+    <div id="singleWrap" class="full hidden"><label for="single">Value</label><input id="single" type="number" step="any" value="1.96"></div>
+    <div id="leftWrap"><label for="left">Lefthand interval</label><input id="left" type="number" step="any" value="-1.96"></div>
+    <div id="rightWrap"><label for="right">Righthand interval</label><input id="right" type="number" step="any" value="1.96"></div>
+  </div>
+
+  <p style="margin-top:14px"><button id="go">Calculate</button></p>
+  <p id="error"></p>
+  <div id="results"></div>
+  <canvas id="chart"></canvas>
+</main>
+
+<script>
+// This page does no statistics. It sends the inputs to Python (/api/calc)
+// and displays whatever comes back.
+const $ = id => document.getElementById(id);
+const areaSel = $("area");
+let lastData = null;
+
+function syncFields() {
+  const a = areaSel.value;
+  $("singleWrap").classList.toggle("hidden", !(a === "1" || a === "2"));
+  $("leftWrap").classList.toggle("hidden", a === "1" || a === "2");
+  $("rightWrap").classList.toggle("hidden", a === "1" || a === "2");
+}
+areaSel.addEventListener("change", syncFields);
+syncFields();
+
+async function calculate() {
+  const err = $("error"), out = $("results");
+  err.textContent = "";
+  const q = new URLSearchParams({
+    mean: $("mean").value, sd: $("sd").value, area: areaSel.value,
+    value: $("single").value, left: $("left").value, right: $("right").value,
+  });
+  try {
+    const res = await fetch("/api/calc?" + q);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Request failed.");
+    lastData = data;
+    out.innerHTML =
+      `<p><strong>Probability:</strong> ${data.probability.toFixed(4)} or ${data.percent.toFixed(2)}%</p>` +
+      data.zscores.map(z => `<p><strong>Z-score (${z.label}):</strong> ${z.z.toFixed(4)}</p>`).join("");
+    draw(data);
+  } catch (e) {
+    out.innerHTML = ""; lastData = null;
+    err.textContent = e.message;
+  }
+}
+$("go").addEventListener("click", calculate);
+document.querySelectorAll("input").forEach(i =>
+  i.addEventListener("keydown", e => { if (e.key === "Enter") calculate(); }));
+
+// ---- Plot (draws the points Python sent) ----
+function draw(d) {
+  const canvas = $("chart");
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+
+  const css = getComputedStyle(document.documentElement);
+  const fg = css.getPropertyValue("--fg").trim();
+  const muted = css.getPropertyValue("--muted").trim();
+  const accent = css.getPropertyValue("--accent").trim();
+  const shade = css.getPropertyValue("--shade").trim();
+
+  const xs = d.xs, ys = d.ys;
+  const xmin = xs[0], xmax = xs[xs.length - 1];
+  const ymax = Math.max(...ys) * 1.12;
+  const L = 16, R = 16, T = 40, B = 30;
+  const px = x => L + (x - xmin) / (xmax - xmin) * (W - L - R);
+  const py = y => H - B - y / ymax * (H - T - B);
+
+  // shaded regions
+  ctx.fillStyle = shade;
+  let run = [];
+  const flush = () => {
+    if (run.length >= 2) {
+      ctx.beginPath();
+      ctx.moveTo(px(xs[run[0]]), py(0));
+      run.forEach(i => ctx.lineTo(px(xs[i]), py(ys[i])));
+      ctx.lineTo(px(xs[run[run.length - 1]]), py(0));
+      ctx.closePath(); ctx.fill();
+    }
+    run = [];
+  };
+  xs.forEach((x, i) => { if (d.shade[i]) run.push(i); else flush(); });
+  flush();
+
+  // curve
+  ctx.strokeStyle = accent; ctx.lineWidth = 2;
+  ctx.beginPath();
+  xs.forEach((x, i) => i ? ctx.lineTo(px(x), py(ys[i])) : ctx.moveTo(px(x), py(ys[i])));
+  ctx.stroke();
+
+  // axis and ticks at mean + k*sd
+  ctx.strokeStyle = fg; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(L, py(0)); ctx.lineTo(W - R, py(0)); ctx.stroke();
+  ctx.fillStyle = muted; ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "center";
+  for (let k = -4; k <= 4; k++) {
+    const x = d.mean + k * d.sd;
+    if (x < xmin || x > xmax) continue;
+    ctx.beginPath(); ctx.moveTo(px(x), py(0)); ctx.lineTo(px(x), py(0) + 5); ctx.stroke();
+    ctx.fillText(+x.toPrecision(4), px(x), py(0) + 18);
+  }
+
+  // title
+  ctx.fillStyle = fg; ctx.font = "13px system-ui, sans-serif";
+  ctx.fillText(`Normal(μ=${d.mean}, σ=${d.sd})`, W / 2, 16);
+  ctx.fillText("z-score(s): " + d.zscores.map(z => z.z.toFixed(4)).join(", "), W / 2, 32);
+}
+
+window.addEventListener("resize", () => { if (lastData) draw(lastData); });
+
+// ---- Light / dark toggle ----
+function currentTheme() {
+  const t = document.documentElement.dataset.theme;
+  if (t) return t;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+function applyTheme(t, save) {
+  document.documentElement.dataset.theme = t;
+  if (save) { try { localStorage.setItem("theme", t); } catch (e) {} }
+  $("theme").textContent = t === "dark" ? "☀ Light mode" : "🌙 Dark mode";
+  if (lastData) draw(lastData);
+}
+$("theme").addEventListener("click", () => applyTheme(currentTheme() === "dark" ? "light" : "dark", true));
+
+let saved = null;
+try { saved = localStorage.getItem("theme"); } catch (e) {}
+if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
+applyTheme(currentTheme(), false);
+calculate();
+</script>
+</body>
+</html>
